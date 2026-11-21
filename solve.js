@@ -180,6 +180,27 @@ export function run(input) {
     if (fAdded > 0) pushError('quote_junk');
   }
 
+  // Finishes a record read into `fields`: the first record sets the width
+  // (and, with a header, becomes the columns); later ones are padded or
+  // cut to it, and each break is reported. Returns false when the record
+  // leaves nothing behind — a line that held only stray CRs.
+  function finishRecord(fields, quoted) {
+    if (fields.length === 1 && fields[0] === '' && !quoted) return false;
+    if (width < 0) width = fields.length;
+    if (header && columns === null) {
+      columns = fields;
+      return true;
+    }
+    if (fields.length < width) {
+      errors.push({ code: 'short_row', line: recordLine, row: recordRow, fields: fields.length });
+      while (fields.length < width) fields.push('');
+    } else if (fields.length > width) {
+      errors.push({ code: 'long_row', line: recordLine, row: recordRow, extra: fields.splice(width) });
+    }
+    rows.push(fields);
+    return true;
+  }
+
   for (;;) {
     // Lines with no characters are no records.
     while (pos < len) {
@@ -197,6 +218,31 @@ export function run(input) {
 
     recordLine = line;
     recordRow = header && columns === null ? null : rows.length;
+
+    // Fast path: the whole record sits on this one line, with no quote
+    // and no stray CR in it, so the record ends at the line break and
+    // its fields are plain slices between commas. The line is taken as
+    // one slice first, so the quote and CR checks never run past it.
+    const nlAt = text.indexOf('\n', pos);
+    const recEnd = nlAt === -1 ? len : nlAt;
+    let segEnd = recEnd;
+    if (nlAt !== -1 && recEnd > pos && text.charCodeAt(recEnd - 1) === 13) segEnd = recEnd - 1;
+    const lineText = text.slice(pos, segEnd);
+    if (lineText.indexOf('"') === -1 && lineText.indexOf('\r') === -1) {
+      const fields = [];
+      let from = 0;
+      for (;;) {
+        const cAt = lineText.indexOf(',', from);
+        if (cAt === -1) { fields.push(lineText.slice(from)); break; }
+        fields.push(lineText.slice(from, cAt));
+        from = cAt + 1;
+      }
+      pos = nlAt === -1 ? len : nlAt + 1;
+      if (nlAt !== -1) line += 1;
+      finishRecord(fields, false);
+      continue;
+    }
+
     const fields = [];
     let quoted;
     do {
@@ -205,23 +251,7 @@ export function run(input) {
       else readUnquoted('');
       fields.push(fValue);
     } while (fEnded === COMMA);
-
-    // A line that held only stray CRs is left with no characters: no
-    // record (its stray_cr errors stay).
-    if (fields.length === 1 && fields[0] === '' && !quoted) continue;
-
-    if (width < 0) width = fields.length;
-    if (header && columns === null) {
-      columns = fields;
-      continue;
-    }
-    if (fields.length < width) {
-      errors.push({ code: 'short_row', line: recordLine, row: recordRow, fields: fields.length });
-      while (fields.length < width) fields.push('');
-    } else if (fields.length > width) {
-      errors.push({ code: 'long_row', line: recordLine, row: recordRow, extra: fields.splice(width) });
-    }
-    rows.push(fields);
+    finishRecord(fields, quoted);
   }
   return { columns: header ? (columns ?? []) : null, rows, errors };
 }
